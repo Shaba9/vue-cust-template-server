@@ -2,7 +2,7 @@
 
 ## Create Custom Terminal Command
 
-1. Create a `vue-create-cust-server.txt` file.
+1. Create a `vue-create-cust-server.txt` file (refer above repo for content of file).
 1. Allow `execute file as program` in properties.
 1. Save the file wherever programs in the computer are saved (/usr/bin for Linux).
 
