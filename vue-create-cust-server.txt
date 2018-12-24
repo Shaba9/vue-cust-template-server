@@ -1,0 +1,352 @@
+mkdir lib
+mkdir public
+mkdir scripts
+touch README.md
+
+cat > .env.example <<- EOF
+DATABASE_URL=
+PORT=3000
+APP_SECRET=
+EOF
+
+cat > .env <<- EOF
+DATABASE_URL=postgres://shaba:123@localhost:5432/<database>
+PORT=3000
+APP_SECRET=SHHH
+PGSSLMODE=require
+EOF
+
+cat > .eslintignore <<- EOF
+public
+EOF
+
+cat > .eslintrc <<- EOF
+{
+  "extends": "eslint:recommended",
+  "parserOptions": {
+    "ecmaVersion": 8,
+    "ecmaFeatures": {
+      "impliedStrict": true
+    }
+  },
+  "env": {
+    "node": true,
+    "es6": true
+  },
+  "rules": {
+    "eqeqeq": ["error", "always"],
+    "no-console": "off",
+    "indent": ["error", 2, { "SwitchCase": 1 }],
+    "quotes": ["warn", "single"],
+    "no-multi-spaces": ["error",
+      {
+          "ignoreEOLComments": true
+      }
+    ],
+    "no-trailing-spaces": "off",
+    "new-cap": "off",
+    "no-redeclare": [
+      "error",
+      {
+        "builtinGlobals": true
+      }
+    ],
+    "semi": ["error", "always"],
+    "space-in-parens": ["error"],
+    "space-infix-ops": "error",
+    "object-curly-spacing": ["error", "always"],
+    "comma-spacing": "error",
+    "space-before-function-paren": ["error", "never"],
+    "keyword-spacing": [
+      "error", 
+      { 
+        "before": true, 
+        "after": true,
+        "overrides": {
+          "if": { "after": false },
+          "for": { "after": false },
+          "while": { "after": false },
+          "do": { "after": false },
+          "switch": { "after": false }
+        } 
+      }
+    ],
+    "array-bracket-spacing": "error"
+  }
+}
+EOF
+
+cat > .gitignore <<- EOF
+node_modules
+.env
+EOF
+
+cat > .travis.yml <<- EOF
+language: node_js
+node_js: "10"
+EOF
+
+cat > package.json <<- EOF
+{
+  "description": "Template project server repo",
+  "scripts": {
+    "create-tables": "node scripts/create-tables.js",
+    "drop-tables": "node scripts/drop-tables.js",
+    "load-seed-data": "node scripts/load-seed-data.js",
+    "recreate-tables": "npm run drop-tables && npm run create-tables",
+    "db-load-all": "npm run recreate-tables && npm run load-seed-data",
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "exit 0",
+    "start": "nodemon server.js"
+  }
+}
+EOF
+
+cat > server.js <<- EOF
+require('dotenv').config();
+const app = require('./lib/app');
+
+const PORT = process.env.PORT;
+
+app.listen(PORT, () => {
+  console.log('server app started on port', PORT);
+});
+EOF
+
+npm init
+npm i express morgan jsonwebtoken bcryptjs nodemon dotenv pg
+npm i eslint -D
+
+cd lib
+mkdir routes
+
+cat > app.js <<- EOF
+const express = require('express');
+const app = express();
+const morgan = require('morgan');
+const auth = require('./routes/auth');
+const jwt = require('./jwt');
+
+app.use(morgan('dev'));
+
+app.use(express.static('public'));
+
+app.use(express.json());
+
+function checkAuth(req, res, next) {
+  const token = req.get('Authorization');
+  if(!token) {
+    res.status(401).json({ error: 'no authorization found' });
+    return;
+  }
+
+  let payload = null;
+  try {
+    payload = jwt.verify(token);
+  }
+  catch (err) {
+    res.status(401).json({ error: 'invalid token' });
+    return;  
+  }
+
+  req.userId = payload.id;
+  next();
+}
+
+app.use('/api/auth', auth);
+
+module.exports = app;
+EOF
+
+cat > db-client.js <<- EOF
+const pg = require('pg');
+const DATABASE_URL = process.env.DATABASE_URL;
+const Client = pg.Client;
+
+// create our pg client object
+const client = new Client(DATABASE_URL);
+
+// call connect
+client.connect()
+  // provide success/failure log based on connection working
+  .then(() => console.log('connected to db', DATABASE_URL))
+  .catch(err => console.error('connection error', err));
+
+// listen for errors on the connection and log them
+client.on('error', err => {
+  console.error('\n**** DATABASE ERROR ****\n\n', err);
+});
+
+// export so other modules (files) can use
+module.exports = client;
+EOF
+
+cat > jwt.js <<- EOF
+const jwt = require('jsonwebtoken');
+const APP_SECRET = process.env.APP_SECRET;
+
+module.exports = {
+  sign(profile) {
+    return jwt.sign({ id: profile.id }, APP_SECRET);
+  },
+  verify(token) {
+    return jwt.verify(token, APP_SECRET);
+  }
+};
+EOF
+
+cd routes
+
+cat > auth.js <<- EOF
+const router = require('express').Router();
+const client = require('../db-client');
+const bcrypt = require('bcryptjs');
+const jwt = require('../jwt');
+
+function getProfileWithToken(profile) {
+  return {
+    id: profile.id,
+    username: profile.username,
+    token: jwt.sign({ id: profile.id })
+  };
+}
+
+router
+  .post('/signup', (req, res) => {
+
+    const body = req.body;
+    const username = body.username;
+    const password = body.password;
+    
+    // username and password needs to exist
+    if(!username || !password) {
+      res.status(400).json({ error: 'username and password required' });
+      return;
+    }
+
+    // username needs to not exist already
+    client.query(\`
+      SELECT id
+      FROM profile
+      WHERE username = \$1;
+    \`,
+    [username])  
+      .then(result => {
+        if(result.rows.length > 0) {
+          res.status(400).json({ error: 'username already exists' });
+          return;
+        }
+
+        console.log('creating new user profile...');
+
+        // insert into profile the new user
+        client.query(\`
+          INSERT INTO profile (username, hash)
+          VALUES (\$1, \$2)
+          RETURNING id, username;
+        \`,
+        [username, bcrypt.hashSync(password, 8)]
+        )
+          .then(result => {
+            const profile = result.rows[0];
+            res.json(getProfileWithToken(profile));
+          });
+      });
+  })
+  
+  .post('/signin', (req, res) => {
+    const body = req.body;
+    const username = body.username;
+    const password = body.password;
+
+    // username and password needs to exist
+    if(!username || !password) {
+      res.status(400).json({ error: 'username and password required' });
+      return;
+    }
+
+    // does username match one in db
+    // relative password should match
+
+    client.query(\`
+      SELECT id, username, hash 
+      FROM profile
+      WHERE username = \$1;
+    \`,
+    [username]
+    )
+      .then(result => {
+        const profile = result.rows[0];
+        // #1 !profile - if no profile, then no match on a row for username
+        // #2 !compareSync - provided password did not match hash from db
+        if(!profile || !bcrypt.compareSync(password, profile.hash)) {
+          res.status(400).json({ error: 'username or password incorrect' });
+          return;
+        }
+
+        res.json(getProfileWithToken(profile));
+      });
+  });
+
+module.exports = router;
+EOF
+
+cd ../../scripts
+
+cat > create-tables.js <<- EOF
+require('dotenv').config();
+const client = require('../lib/db-client');
+
+client.query(\`
+  CREATE TABLE IF NOT EXISTS profile (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(256) NOT NULL,
+    hash VARCHAR(256) NOT NULL
+  );
+\`)
+  .then(
+    () => console.log('create tables complete'),
+    err => console.log(err)
+  )
+  .then(() => {
+    client.end();
+  });
+EOF
+
+cat > drop-tables.js <<- EOF
+require('dotenv').config();
+const client = require('../lib/db-client');
+
+client.query(\`
+  DROP TABLE IF EXISTS profile;
+\`)
+  .then(
+    () => console.log('drop tables complete'),
+    err => console.log(err)
+  )
+  .then(() => {
+    client.end();
+  });
+EOF
+
+cat > load-seed-data.js <<- EOF
+require('dotenv').config();
+const client = require('../lib/db-client');
+const bcrypt = require('bcryptjs');
+
+client.query(\`
+  INSERT INTO profile (username, hash)
+  VALUES (\$1, \$2)
+  RETURNING id;
+\`,
+['shabz', bcrypt.hashSync('123', 8)]
+)
+  .then(
+    () => console.log('seed data load complete'),
+    err => console.log(err)
+  )
+  .then(() => {
+    client.end();
+  });
+EOF
