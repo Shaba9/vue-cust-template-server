@@ -4,7 +4,7 @@ const bcrypt = require('bcryptjs');
 
 client.query(`
   INSERT INTO profile (username, hash)
-  VALUES (, )
+  VALUES ($1, $2)
   RETURNING id;
 `,
 ['shabz', bcrypt.hashSync('123', 8)]
